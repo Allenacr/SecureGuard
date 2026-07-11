@@ -1,0 +1,28 @@
+# IDE, Editor, and System Caches
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Sensitive Credentials / Configuration
+pc_software/firebase_service_account.json
+**/firebase_service_account.json
+**/google-services.json
+.env
+.env.*
+*.env
+*.log
+
+# Caches and builds
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+node_modules/

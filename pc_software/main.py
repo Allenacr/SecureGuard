@@ -25,7 +25,6 @@ from config import logger, DATA_DIR
 from database import Database
 from file_protector import FileProtector
 from file_watcher import FileWatcher
-from decoy_monitor import DecoyMonitor
 from notification_sender import NotificationSender
 from security_popup import SecurityPopup
 from done_popup import DonePopup
@@ -70,13 +69,11 @@ class SecureGuardApp:
         # File watcher (needs file_protector and database)
         self.file_watcher = FileWatcher(self.file_protector, self.db)
 
-        # Decoy monitor (needs file_protector, database, and callback)
-        self.decoy_monitor = DecoyMonitor(
-            self.file_protector, self.db, self._on_access_detected
-        )
-
         # Keyboard listener (needs database and callback)
         self.keyboard_listener = KeyboardListener(self.db, self._open_settings)
+
+        # TCP Socket server to listen for local decoy trigger signals
+        self._start_ipc_server()
 
         # Subscribe to realtime changes
         self._setup_realtime_subscriptions()
@@ -86,6 +83,51 @@ class SecureGuardApp:
 
         # Protect all files from database that aren't already protected
         self._initial_protection()
+
+    def _start_ipc_server(self):
+        """Starts a background thread that listens on a local port for decoy trigger signals."""
+        def _ipc_loop():
+            import socket
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                server.bind(("127.0.0.1", 28473))
+                server.listen(5)
+            except Exception as e:
+                logger.error(f"Failed to start IPC server: {e}")
+                return
+
+            logger.info("IPC Server listening on 127.0.0.1:28473")
+            while getattr(self, '_running', True):
+                try:
+                    server.settimeout(1.0)
+                    try:
+                        conn, addr = server.accept()
+                    except socket.timeout:
+                        continue
+                    
+                    data = conn.recv(1024).decode("utf-8")
+                    conn.close()
+                    
+                    if data.startswith("TRIGGER:"):
+                        file_path = data[8:].strip()
+                        logger.info(f"IPC Trigger received for: {file_path}")
+                        # Process connection in a separate thread so IPC loop isn't blocked
+                        threading.Thread(
+                            target=self._on_access_detected,
+                            args=(file_path,),
+                            daemon=True,
+                            name=f"IPCHandler-{os.path.basename(file_path)}"
+                        ).start()
+                except Exception as e:
+                    logger.error(f"IPC Server connection error: {e}")
+            
+            try:
+                server.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=_ipc_loop, daemon=True, name="IPCServer").start()
 
     def _setup_realtime_subscriptions(self):
         """Set up Supabase realtime subscriptions."""
@@ -123,7 +165,6 @@ class SecureGuardApp:
 
         # Start services
         self.heartbeat_service.start()
-        self.decoy_monitor.start()
         self.file_watcher.start()
         self.keyboard_listener.start()
 
@@ -160,7 +201,6 @@ class SecureGuardApp:
         logger.info("Shutting down SecureGuard...")
         self._running = False
 
-        self.decoy_monitor.stop()
         self.file_watcher.stop()
         self.keyboard_listener.stop()
         self.heartbeat_service.stop()
@@ -174,38 +214,27 @@ class SecureGuardApp:
 
     def _on_access_detected(self, file_path: str):
         """
-        Called when a decoy file access is detected (from worker thread).
+        Called when a decoy file access is detected (from IPC trigger).
         Does all non-GUI work, then enqueues the popup for the main thread.
         """
         file_name = get_file_name(file_path)
         logger.warning(f"ACCESS DETECTED: {file_name} ({file_path})")
 
         try:
-            # IMMEDIATELY close any process that opened the file
-            # This prevents the decoy from actually opening — only the popup will appear
-            close_file_process(file_path)
-            logger.info(f"File process closed immediately: {file_path}")
-
             # Check if file is blocked
             if self.db.is_file_blocked(file_path):
                 logger.info(f"File is blocked — denying access: {file_path}")
-                close_file_process(file_path)
-                # Clean up processing state so monitor can re-detect if needed
-                self.decoy_monitor.mark_done(file_path)
                 return
 
             # Check if protection is enabled
             if not self.db.get_protection_enabled():
                 logger.info("Protection is disabled — ignoring access")
-                # Clean up processing state
-                self.decoy_monitor.mark_done(file_path)
                 return
 
             # Acquire popup lock — only ONE popup at a time
             # If another popup is already showing, skip this alert
             if not self._popup_lock.acquire(blocking=False):
                 logger.warning(f"Another popup is active — skipping alert for {file_name}")
-                self.decoy_monitor.mark_done(file_path)
                 return
 
             try:
@@ -213,7 +242,6 @@ class SecureGuardApp:
                 incident_id = self.db.create_incident(file_path, file_name)
                 if not incident_id:
                     logger.error("Failed to create incident")
-                    self.decoy_monitor.mark_done(file_path)
                     return
 
                 # Step 2: Send notification in background (don't block popup)
@@ -238,8 +266,6 @@ class SecureGuardApp:
 
         except Exception as e:
             logger.error(f"Alert pipeline error for {file_path}: {e}", exc_info=True)
-            # Always clean up the decoy monitor so the file can be re-triggered later
-            self.decoy_monitor.mark_done(file_path)
 
     def _show_popup(self, file_path: str, file_name: str, incident_id: str):
         """Show the security popup — MUST be called from the main thread."""
@@ -256,7 +282,6 @@ class SecureGuardApp:
             popup.show()
         except Exception as e:
             logger.error(f"Popup error for {file_path}: {e}", exc_info=True)
-            self.decoy_monitor.mark_done(file_path)
         finally:
             self._popup_lock.release()
 
@@ -280,8 +305,6 @@ class SecureGuardApp:
             self._gui_queue.put(lambda fp=file_path, fn=file_name: self._show_done_popup(fp, fn))
         else:
             logger.error(f"Failed to restore file: {file_path}")
-            # Reset decoy monitor tracking if it failed
-            self.decoy_monitor.mark_done(file_path)
 
     def _show_done_popup(self, file_path: str, file_name: str):
         """Show the done popup cleanly on the main thread."""
@@ -294,7 +317,6 @@ class SecureGuardApp:
             done_popup.show()
         except Exception as e:
             logger.error(f"Done popup error: {e}", exc_info=True)
-            self.decoy_monitor.mark_done(file_path)
 
     def _on_access_denied(self, file_path: str, incident_id: str):
         """
@@ -319,9 +341,6 @@ class SecureGuardApp:
         # Close any process that opened the file
         close_file_process(file_path)
 
-        # Reset decoy monitor tracking
-        self.decoy_monitor.mark_done(file_path)
-
     def _on_file_blocked(self, file_path: str, incident_id: str):
         """
         Called when a file is permanently blocked (max attempts exceeded).
@@ -343,9 +362,6 @@ class SecureGuardApp:
         # Close any process that opened the file
         close_file_process(file_path)
 
-        # Reset decoy monitor tracking
-        self.decoy_monitor.mark_done(file_path)
-
     def _on_done_viewing(self, file_path: str):
         """Called when user clicks Done after viewing a file."""
         logger.info(f"Done viewing: {file_path}")
@@ -356,9 +372,6 @@ class SecureGuardApp:
 
         # Re-protect the file
         self.file_protector.re_protect_file(file_path)
-
-        # Reset decoy monitor
-        self.decoy_monitor.reset_file(file_path)
 
     # ============================================================
     # SETTINGS
@@ -385,9 +398,38 @@ class SecureGuardApp:
 
 
 # ============================================================
+# IPC CLIENT SENDER
+# ============================================================
+
+def send_trigger_signal(file_path: str) -> bool:
+    """Connects to the IPC server and sends the trigger file path."""
+    import socket
+    try:
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(("127.0.0.1", 28473))
+        client.sendall(f"TRIGGER:{file_path}".encode("utf-8"))
+        client.close()
+        return True
+    except Exception as e:
+        print(f"Error sending trigger signal: {e}")
+        return False
+
+
+# ============================================================
 # ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
-    app = SecureGuardApp()
-    app.start()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trigger", help="File path of the decoy that was accessed")
+    args = parser.parse_args()
+
+    if args.trigger:
+        success = send_trigger_signal(args.trigger)
+        if not success:
+            print("SecureGuard background service is not running.")
+        sys.exit(0)
+    else:
+        app = SecureGuardApp()
+        app.start()

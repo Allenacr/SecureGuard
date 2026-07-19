@@ -9,6 +9,9 @@ import shutil
 import logging
 import base64
 import hashlib
+import sys
+import winreg
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -125,37 +128,112 @@ class FileProtector:
                 meta_path.unlink()
             return False
 
+    def _get_icon_location(self, file_path: str) -> str:
+        """
+        Get icon path and index for a given file path formatted for WScript.Shell.
+        Returns a string "path,index" suitable for WScript.Shell IconLocation.
+        """
+        ext = get_file_extension(file_path)
+        if not ext:
+            return ""
+            
+        try:
+            # Query Windows Registry for default icon path associated with this file extension
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f".{ext}") as key:
+                assoc_name = winreg.QueryValue(key, "")
+                
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{assoc_name}\\DefaultIcon") as key:
+                icon_val = winreg.QueryValue(key, "")
+                
+            if icon_val:
+                icon_val = winreg.ExpandEnvironmentStrings(icon_val)
+                icon_val = icon_val.strip('"')
+                
+                # Check for standard 'path,index' format
+                if ',' in icon_val:
+                    parts = icon_val.rsplit(',', 1)
+                    icon_path = parts[0].strip()
+                    try:
+                        icon_index = int(parts[1].strip())
+                        return f"{icon_path},{icon_index}"
+                    except ValueError:
+                        return f"{icon_val},0"
+                else:
+                    return f"{icon_val},0"
+        except Exception:
+            pass
+            
+        # Fallback system defaults (shell32.dll index locations)
+        shell32_path = os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'System32', 'shell32.dll')
+        if ext in ('txt', 'doc', 'docx', 'pdf', 'csv', 'xlsx', 'xls', 'json', 'xml', 'py', 'js', 'html', 'css'):
+            return f"{shell32_path},0"
+        elif ext in ('png', 'jpg', 'jpeg', 'gif', 'bmp', 'ico'):
+            return f"{shell32_path},225"
+        elif ext in ('mp3', 'wav', 'flac', 'ogg', 'wma'):
+            return f"{shell32_path},226"
+        elif ext in ('mp4', 'avi', 'mkv', 'mov', 'wmv'):
+            return f"{shell32_path},227"
+        elif ext in ('exe', 'msi', 'bat', 'cmd'):
+            return f"{shell32_path},15"
+        else:
+            return f"{shell32_path},0"
+
+    def _create_shortcut(self, shortcut_path: str, target_path: str, arguments: str, icon_location: str = ""):
+        """Create a native Windows shortcut (.lnk) file via PowerShell COM."""
+        # Escape any single quotes for PowerShell (single-quoted string rules)
+        esc_shortcut = shortcut_path.replace("'", "''")
+        esc_target = target_path.replace("'", "''")
+        esc_args = arguments.replace("'", "''")
+        esc_workdir = os.path.dirname(target_path).replace("'", "''")
+        
+        powershell_cmd = (
+            f'$s = (New-Object -COM WScript.Shell).CreateShortcut(\'{esc_shortcut}\'); '
+            f'$s.TargetPath = \'{esc_target}\'; '
+            f'$s.Arguments = \'{esc_args}\'; '
+            f'$s.WorkingDirectory = \'{esc_workdir}\'; '
+        )
+        if icon_location:
+            esc_icon = icon_location.replace("'", "''")
+            powershell_cmd += f'$s.IconLocation = \'{esc_icon}\'; '
+        powershell_cmd += '$s.Save()'
+
+        try:
+            logger.info(f"Creating shortcut: {shortcut_path} -> {target_path} {arguments}")
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "-"],
+                input=powershell_cmd,
+                text=True,
+                capture_output=True,
+                check=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to create shortcut: {e}")
+
     def _create_decoy(self, original_path: str):
         """
-        Create a decoy file at the original location.
-        The decoy looks like the real file but is empty/minimal.
+        Create a decoy shortcut (.lnk) file at the original location.
+        The shortcut points to main.py with the --trigger argument.
         """
         try:
-            # Remove original file
+            # Remove original file if it exists
             if os.path.exists(original_path):
                 os.remove(original_path)
 
-            # Create decoy — empty file with same name
-            extension = get_file_extension(original_path)
-
-            if extension in ("txt", "csv", "json", "xml", "py", "js", "html", "css"):
-                # Text-based decoys — write minimal content
-                with open(original_path, "w", encoding="utf-8") as f:
-                    f.write("")
-            elif extension in ("pdf",):
-                # Minimal PDF
-                with open(original_path, "wb") as f:
-                    f.write(b"%PDF-1.0\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF")
-            elif extension in ("docx", "xlsx", "pptx"):
-                # Empty Office XML — just a zero-byte file
-                with open(original_path, "wb") as f:
-                    f.write(b"")
-            else:
-                # Binary files — zero-byte decoy
-                with open(original_path, "wb") as f:
-                    f.write(b"")
-
-            logger.info(f"Decoy created: {original_path}")
+            shortcut_path = os.path.normpath(original_path + ".lnk")
+            
+            # Find pythonw.exe running in the current environment
+            python_exe = sys.executable
+            pythonw_exe = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+            if not os.path.exists(pythonw_exe):
+                pythonw_exe = python_exe
+                
+            main_py = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"))
+            arguments = f'"{main_py}" --trigger "{original_path}"'
+            
+            icon_location = self._get_icon_location(original_path)
+            
+            self._create_shortcut(shortcut_path, pythonw_exe, arguments, icon_location)
+            logger.info(f"Decoy shortcut created: {shortcut_path}")
         except Exception as e:
             logger.error(f"Error creating decoy: {e}")
 
@@ -163,7 +241,8 @@ class FileProtector:
         """
         Restore a protected file:
         1. Decrypt from vault
-        2. Replace decoy with real file
+        2. Delete shortcut decoy
+        3. Replace decoy with real file
         """
         file_path = os.path.normpath(file_path)
         vault_path = self._get_vault_path(file_path)
@@ -179,6 +258,15 @@ class FileProtector:
 
             # Decrypt
             original_data = self.fernet.decrypt(encrypted_data)
+
+            # Remove shortcut decoy if exists
+            decoy_path = file_path + ".lnk"
+            if os.path.exists(decoy_path):
+                try:
+                    os.remove(decoy_path)
+                    logger.info(f"Decoy shortcut deleted: {decoy_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove decoy shortcut: {e}")
 
             # Replace decoy with real file
             with open(file_path, "wb") as f:

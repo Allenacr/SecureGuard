@@ -187,8 +187,17 @@ class SecurityPopup:
         # Start checking for owner decision updates in GUI thread
         self.root.after(500, self._check_decision_update)
 
-        # Run the GUI event loop
-        self.root.mainloop()
+        try:
+            # Run the GUI event loop
+            self.root.mainloop()
+        except Exception as e:
+            logger.error(f"Popup loop error: {e}", exc_info=True)
+        finally:
+            try:
+                if self.root and self.root.winfo_exists():
+                    self.root.destroy()
+            except Exception:
+                pass
 
     def _on_submit(self):
         """Handle answer submission."""

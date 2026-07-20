@@ -85,7 +85,9 @@ class ShieldStatus extends StatelessWidget {
           Switch.adaptive(
             value: isEnabled,
             onChanged: onToggle,
-            activeColor: AppTheme.accentGreen,
+            activeThumbColor: AppTheme.accentGreen,
+            activeTrackColor: AppTheme.accentGreen.withValues(alpha: 0.3),
+            inactiveThumbColor: AppTheme.accentRed,
             inactiveTrackColor: AppTheme.accentRed.withValues(alpha: 0.3),
           ),
         ],

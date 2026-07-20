@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:intl/intl.dart';
 
 import '../config/theme.dart';
 import '../providers/auth_provider.dart';
@@ -10,8 +9,6 @@ import '../providers/incidents_provider.dart';
 import '../providers/protection_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/notification_service.dart';
-import '../services/database_service.dart';
-import '../models/incident.dart';
 import '../widgets/shield_status.dart';
 import '../widgets/incident_card.dart';
 import '../widgets/panic_button.dart';

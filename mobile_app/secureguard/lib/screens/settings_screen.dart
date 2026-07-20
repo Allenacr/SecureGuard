@@ -132,17 +132,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 // Notification Sound (Feature 20)
                 _sectionTitle('Notification Sound'),
                 const SizedBox(height: 8),
-                Card(child: Column(children: [
-                  for (final sound in ['default', 'siren', 'alarm', 'beep'])
-                    RadioListTile<String>(
-                      title: Text(sound[0].toUpperCase() + sound.substring(1)),
-                      value: sound, groupValue: _selectedSound,
-                      onChanged: (v) {
-                        setState(() => _selectedSound = v!);
-                        sp.updateNotificationSound(v!);
-                      },
+                Card(
+                  child: RadioGroup<String>(
+                    groupValue: _selectedSound,
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() => _selectedSound = value);
+                      sp.updateNotificationSound(value);
+                    },
+                    child: Column(
+                      children: ['default', 'siren', 'alarm', 'beep'].map((sound) {
+                        return RadioListTile<String>(
+                          title: Text(sound[0].toUpperCase() + sound.substring(1)),
+                          value: sound,
+                        );
+                      }).toList(),
                     ),
-                ])).animate().fadeIn(delay: 600.ms, duration: 300.ms),
+                  ),
+                ).animate().fadeIn(delay: 600.ms, duration: 300.ms),
 
                 const SizedBox(height: 24),
 
@@ -245,8 +252,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    for (final c in _qControllers) c.dispose();
-    for (final c in _aControllers) c.dispose();
+    for (final c in _qControllers) {
+      c.dispose();
+    }
+    for (final c in _aControllers) {
+      c.dispose();
+    }
     _keywordController.dispose();
     super.dispose();
   }

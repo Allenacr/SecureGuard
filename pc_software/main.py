@@ -174,6 +174,8 @@ class SecureGuardApp:
         logger.info("All services started — SecureGuard is active")
 
         self._running = True
+        self._active_incidents = set()
+        self._recent_triggers = {}
 
         # Main loop — process GUI tasks on the main thread.
         # tkinter MUST run on the main thread or it crashes with Tcl_AsyncDelete.
@@ -231,9 +233,23 @@ class SecureGuardApp:
                 logger.info("Protection is disabled — ignoring access")
                 return
 
+            now = time.time()
+            if file_path in self._active_incidents:
+                logger.info(f"Duplicate trigger ignored for {file_path}")
+                return
+
+            last_trigger = self._recent_triggers.get(file_path, 0)
+            if now - last_trigger < 2.0:
+                logger.info(f"Recent trigger suppressed for {file_path}")
+                return
+
+            self._recent_triggers[file_path] = now
+            self._active_incidents.add(file_path)
+
             # Acquire popup lock — only ONE popup at a time
             # If another popup is already showing, skip this alert
             if not self._popup_lock.acquire(blocking=False):
+                self._active_incidents.discard(file_path)
                 logger.warning(f"Another popup is active — skipping alert for {file_name}")
                 return
 
@@ -262,6 +278,7 @@ class SecureGuardApp:
                 
             except Exception:
                 self._popup_lock.release()
+                self._active_incidents.discard(file_path)
                 raise
 
         except Exception as e:
@@ -284,6 +301,9 @@ class SecureGuardApp:
             logger.error(f"Popup error for {file_path}: {e}", exc_info=True)
         finally:
             self._popup_lock.release()
+            if file_path in self._active_incidents:
+                self._active_incidents.discard(file_path)
+            self._recent_triggers.pop(file_path, None)
 
     def _on_access_granted(self, file_path: str, incident_id: str):
         """

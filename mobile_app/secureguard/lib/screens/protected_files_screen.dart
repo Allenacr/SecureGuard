@@ -4,7 +4,6 @@ import 'package:flutter_animate/flutter_animate.dart';
 
 import '../config/theme.dart';
 import '../providers/protection_provider.dart';
-import '../models/protected_file.dart';
 
 class ProtectedFilesScreen extends StatefulWidget {
   const ProtectedFilesScreen({super.key});

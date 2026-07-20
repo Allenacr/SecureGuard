@@ -1,0 +1,2 @@
+This is a demo file for SecureGuard.
+Open it to trigger the protection workflow.

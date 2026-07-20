@@ -133,6 +133,9 @@ class FileProtector:
         Get icon path and index for a given file path formatted for WScript.Shell.
         Returns a string "path,index" suitable for WScript.Shell IconLocation.
         """
+        if not file_path:
+            return ""
+
         ext = get_file_extension(file_path)
         if not ext:
             return ""
@@ -209,31 +212,53 @@ class FileProtector:
         except Exception as e:
             logger.error(f"Failed to create shortcut: {e}")
 
+    def _build_decoy_launcher_script(self, original_path: str, pythonw_exe: str, main_py: str) -> str:
+        """Build a batch launcher that triggers the popup flow when executed."""
+        escaped_original = original_path.replace('"', '\"')
+        escaped_pythonw = pythonw_exe.replace('"', '\"')
+        escaped_main = main_py.replace('"', '\"')
+        return (
+            "@echo off\n"
+            "setlocal\n"
+            f'"{escaped_pythonw}" "{escaped_main}" --trigger "{escaped_original}"\n'
+            "exit /b 0\n"
+        )
+
     def _create_decoy(self, original_path: str):
         """
-        Create a decoy shortcut (.lnk) file at the original location.
-        The shortcut points to main.py with the --trigger argument.
+        Create a launcher-style decoy at the original location.
+        The generated batch launcher triggers the popup flow when opened.
         """
         try:
             # Remove original file if it exists
             if os.path.exists(original_path):
                 os.remove(original_path)
 
-            shortcut_path = os.path.normpath(original_path + ".lnk")
-            
             # Find pythonw.exe running in the current environment
             python_exe = sys.executable
             pythonw_exe = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
             if not os.path.exists(pythonw_exe):
                 pythonw_exe = python_exe
-                
+
             main_py = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"))
-            arguments = f'"{main_py}" --trigger "{original_path}"'
-            
-            icon_location = self._get_icon_location(original_path)
-            
-            self._create_shortcut(shortcut_path, pythonw_exe, arguments, icon_location)
-            logger.info(f"Decoy shortcut created: {shortcut_path}")
+            ext = get_file_extension(original_path)
+            decoy_path = os.path.normpath(original_path)
+            if not ext:
+                decoy_path = os.path.normpath(original_path + ".cmd")
+
+            launcher_content = self._build_decoy_launcher_script(original_path, pythonw_exe, main_py)
+            with open(decoy_path, "w", encoding="utf-8") as f:
+                f.write(launcher_content)
+
+            try:
+                icon_location = self._get_icon_location(original_path)
+                if icon_location:
+                    shortcut_path = decoy_path + ".lnk"
+                    self._create_shortcut(shortcut_path, pythonw_exe, f'"{main_py}" --trigger "{original_path}"', icon_location)
+            except Exception as e:
+                logger.warning(f"Could not create icon-matched shortcut for decoy: {e}")
+
+            logger.info(f"Decoy created at: {decoy_path}")
         except Exception as e:
             logger.error(f"Error creating decoy: {e}")
 
@@ -259,14 +284,14 @@ class FileProtector:
             # Decrypt
             original_data = self.fernet.decrypt(encrypted_data)
 
-            # Remove shortcut decoy if exists
-            decoy_path = file_path + ".lnk"
-            if os.path.exists(decoy_path):
-                try:
-                    os.remove(decoy_path)
-                    logger.info(f"Decoy shortcut deleted: {decoy_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to remove decoy shortcut: {e}")
+            # Remove decoy files and their shortcut siblings
+            for decoy_path in [file_path, file_path + ".cmd", file_path + ".lnk"]:
+                if os.path.exists(decoy_path):
+                    try:
+                        os.remove(decoy_path)
+                        logger.info(f"Decoy removed: {decoy_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove decoy: {e}")
 
             # Replace decoy with real file
             with open(file_path, "wb") as f:

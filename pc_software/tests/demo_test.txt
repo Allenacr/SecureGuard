@@ -1,2 +1,4 @@
-This is a demo file for SecureGuard.
-Open it to trigger the protection workflow.
+@echo off
+setlocal
+"C:\Users\Hp\Desktop\others\SecureGuard2\.venv\Scripts\pythonw.exe" "C:\Users\Hp\Desktop\others\SecureGuard2\pc_software\main.py" --trigger "pc_software\tests\demo_test.txt"
+exit /b 0

@@ -13,7 +13,7 @@ import sys
 import winreg
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from cryptography.fernet import Fernet
 from config import VAULT_DIR, USER_PASSWORD
@@ -90,10 +90,17 @@ class FileProtector:
         vault_path = self._get_vault_path(file_path)
         meta_path = self._get_metadata_path(file_path)
 
-        # Skip if already protected (vault file exists)
+        # If vault file exists, we may already be protected.
+        # However, if the original file still exists on disk, that's an inconsistent state
+        # (vault present but original not replaced by decoy). In that case re-encrypt the
+        # current original to the vault and recreate the decoy so protection matches DB/UI.
         if vault_path.exists():
-            logger.info(f"File already protected: {file_path}")
-            return True
+            if os.path.exists(file_path):
+                logger.warning(f"Vault exists but original still present — re-protecting: {file_path}")
+                # We'll continue and overwrite the vault with the current file contents
+            else:
+                logger.info(f"File already protected: {file_path}")
+                return True
 
         try:
             # Step 1: Read the original file
@@ -242,23 +249,23 @@ class FileProtector:
 
             main_py = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"))
             ext = get_file_extension(original_path)
-            decoy_path = os.path.normpath(original_path)
-            if not ext:
-                decoy_path = os.path.normpath(original_path + ".cmd")
-
             launcher_content = self._build_decoy_launcher_script(original_path, pythonw_exe, main_py)
-            with open(decoy_path, "w", encoding="utf-8") as f:
-                f.write(launcher_content)
 
-            try:
-                icon_location = self._get_icon_location(original_path)
-                if icon_location:
-                    shortcut_path = decoy_path + ".lnk"
-                    self._create_shortcut(shortcut_path, pythonw_exe, f'"{main_py}" --trigger "{original_path}"', icon_location)
-            except Exception as e:
-                logger.warning(f"Could not create icon-matched shortcut for decoy: {e}")
-
-            logger.info(f"Decoy created at: {decoy_path}")
+            icon_location = self._get_icon_location(original_path)
+            if ext and icon_location:
+                shortcut_path = os.path.normpath(original_path + ".lnk")
+                self._create_shortcut(
+                    shortcut_path,
+                    pythonw_exe,
+                    f'"{main_py}" --trigger "{original_path}"',
+                    icon_location,
+                )
+                logger.info(f"Decoy shortcut created at: {shortcut_path}")
+            else:
+                decoy_path = os.path.normpath(original_path if ext else original_path + ".cmd")
+                with open(decoy_path, "w", encoding="utf-8") as f:
+                    f.write(launcher_content)
+                logger.info(f"Decoy created at: {decoy_path}")
         except Exception as e:
             logger.error(f"Error creating decoy: {e}")
 
@@ -309,6 +316,19 @@ class FileProtector:
         if self.restore_file(file_path):
             return open_file(file_path)
         return False
+
+    def restore_protected_files(self, file_paths: List[str]) -> List[str]:
+        """Restore a list of protected files that are currently stored in the vault."""
+        restored_paths: List[str] = []
+        for file_path in file_paths:
+            normalized_path = os.path.normpath(file_path or "")
+            if not normalized_path:
+                continue
+            if os.path.isdir(normalized_path):
+                continue
+            if self.is_protected(normalized_path) and self.restore_file(normalized_path):
+                restored_paths.append(normalized_path)
+        return restored_paths
 
     def re_protect_file(self, file_path: str) -> bool:
         """

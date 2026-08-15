@@ -186,7 +186,39 @@ class Database:
             logger.info(f"Added protected {file_type}: {path}")
             return result.data[0] if result.data else None
         except Exception as e:
+            # Handle unique constraint violations gracefully: the file is already protected
+            msg = str(e)
             logger.error(f"Error adding protected file: {e}")
+            if "protected_files_user_id_path_key" in msg or "duplicate key" in msg:
+                try:
+                    # There is a DB row conflicting with this path. Attempt to find it
+                    # even if it's soft-deleted, and reactivate it if needed.
+                    result = (self.client.table("protected_files")
+                              .select("*")
+                              .eq("user_id", self.user_id)
+                              .eq("path", path)
+                              .execute())
+                    existing = result.data[0] if result.data else None
+                    if existing:
+                        # If the row exists but is inactive, reactivate it
+                        if not existing.get("is_active", True):
+                            try:
+                                self.client.table("protected_files").update({"is_active": True}).eq("user_id", self.user_id).eq("path", path).execute()
+                                with self._cache_lock:
+                                    self._protected_files_cache = None
+                                logger.info(f"Re-activated protected file row for: {path}")
+                                # Fetch updated row
+                                result = (self.client.table("protected_files").select("*").eq("user_id", self.user_id).eq("path", path).execute())
+                                existing = result.data[0] if result.data else existing
+                                return existing
+                            except Exception:
+                                logger.warning(f"Failed to reactivate protected file row for: {path}")
+                                return existing
+                        logger.info(f"Protected file already exists in DB: {path}")
+                        return existing
+                except Exception:
+                    # Fall through to return None if query fails
+                    pass
             return None
 
     def remove_protected_file(self, path: str) -> bool:

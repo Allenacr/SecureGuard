@@ -208,6 +208,16 @@ class SecureGuardApp:
         self.heartbeat_service.stop()
         self.notification_sender.stop_all_repeats()
 
+        protected_items = self.db.get_protected_files(force_refresh=True)
+        protected_paths = [
+            item["path"]
+            for item in protected_items
+            if item.get("is_active", True) and item.get("file_type", "file") != "folder"
+        ]
+        restored_paths = self.file_protector.restore_protected_files(protected_paths)
+        if restored_paths:
+            logger.info(f"Restored {len(restored_paths)} protected files during shutdown")
+
         logger.info("SecureGuard stopped")
 
     # ============================================================
